@@ -1,21 +1,43 @@
 # Substack Archiver
 
-A small, dependency-light Python script that downloads Substack posts (free
-or paid) as print-ready PDFs. Designed to run on a schedule via `launchd`
-on macOS so new posts are archived automatically.
+A small Python script that downloads Substack posts (free or paid) as
+**both print-ready PDFs and self-contained Markdown** (with images
+downloaded locally). Designed to run on a schedule via `launchd` on
+macOS so new posts are archived automatically.
 
 ## How it works
 
 1. Calls the Substack archive API with your session cookie to enumerate
    every post you have access to.
-2. For each post not already archived, opens it in headless Chrome and
-   prints to PDF using the Chrome DevTools Protocol — your auth cookie is
-   injected so paid content unlocks.
-3. Records archived post IDs in `.archived.json` so re-runs only fetch
-   new posts. Safe to run as often as you like.
+2. For each post not already archived, produces:
+   - A **PDF** — opens the post in headless Chrome with your cookie
+     injected and prints to PDF (paid content unlocks).
+   - A **Markdown folder** — fetches the post HTML from the API,
+     converts to Markdown, downloads every image locally, and rewrites
+     image references to point at the local files. Self-contained;
+     works offline forever.
+3. Records archived post IDs in `.archived.json`. Re-runs only fetch
+   what's missing — including artifacts you've deleted from disk.
 4. Throttles between fetches and retries on rate-limit pages.
 
-Files are named `YYYY-MM-DD_post-title.pdf` so they sort chronologically.
+### Output layout
+
+```
+OUTPUT_DIR/
+├── 2026-05-05_post-title.pdf           ← print-ready
+├── 2026-05-04_another-post.pdf
+├── markdown/
+│   ├── 2026-05-05_post-title/
+│   │   ├── post.md                     ← self-contained
+│   │   └── images/
+│   │       ├── img-001.jpg
+│   │       └── img-002.png
+│   └── 2026-05-04_another-post/
+│       └── ...
+└── .archived.json                      ← cache (do not edit)
+```
+
+Skip either format with `--no-pdf` or `--no-markdown`.
 
 ## Quick setup
 
@@ -26,8 +48,8 @@ git clone https://github.com/<you>/substack-archiver.git
 cd substack-archiver
 chmod +x run.sh archive_substack.py
 
-# 1. Install the only Python dep
-pip3 install --break-system-packages websocket-client
+# 1. Install Python deps
+pip3 install --break-system-packages websocket-client html2text
 
 # 2. Create your local config (gitignored)
 cp config.sh.example config.sh

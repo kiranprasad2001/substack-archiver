@@ -29,6 +29,84 @@ UA = (
 )
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 ARCHIVE_PATH = "/api/v1/archive?sort=new&search=&offset={offset}&limit={limit}"
+POST_PATH = "/api/v1/posts/{slug}"
+
+
+def fetch_post_body(base_url: str, slug: str, cookie_header: str = "") -> dict:
+    url = base_url.rstrip("/") + POST_PATH.format(slug=slug)
+    headers = {"User-Agent": UA, "Accept": "application/json"}
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def fetch_post_body_via_page(canonical_url: str, cookie_header: str = "") -> str:
+    """Fallback: scrape body HTML from the rendered post page."""
+    headers = {"User-Agent": UA, "Accept": "text/html"}
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    req = urllib.request.Request(canonical_url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        html = r.read().decode("utf-8", errors="replace")
+    # Substack embeds the post in <div class="body markup"> (or similar).
+    m = re.search(
+        r'<div[^>]+class="[^"]*\bbody markup\b[^"]*"[^>]*>(.*?)</div>\s*(?:<div[^>]+class="[^"]*subscribe-widget|<footer)',
+        html, re.DOTALL,
+    )
+    if m:
+        return m.group(1)
+    # Fallback: any body markup div, lazier match
+    m = re.search(r'<div[^>]+class="[^"]*\bbody markup\b[^"]*"[^>]*>(.*)', html, re.DOTALL)
+    return m.group(1) if m else ""
+
+
+def html_to_markdown(html: str) -> str:
+    import html2text
+    h = html2text.HTML2Text()
+    h.body_width = 0  # disable line wrapping
+    h.ignore_links = False
+    h.ignore_images = False
+    h.protect_links = True
+    return h.handle(html or "")
+
+
+def _ext_from_url(url: str) -> str:
+    path = urlparse(url).path
+    m = re.search(r"\.([A-Za-z0-9]{2,5})$", path)
+    if not m:
+        return ".jpg"
+    ext = m.group(1).lower()
+    return f".{ext}" if ext in {"jpg", "jpeg", "png", "gif", "webp", "svg", "avif"} else ".jpg"
+
+
+_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+
+
+def download_images_and_rewrite(md: str, images_dir: Path) -> str:
+    counter = {"n": 0}
+
+    def repl(match: re.Match) -> str:
+        alt = match.group(1)
+        url = match.group(2)
+        if not url.startswith(("http://", "https://")):
+            return match.group(0)
+        counter["n"] += 1
+        filename = f"img-{counter['n']:03d}{_ext_from_url(url)}"
+        local = images_dir / filename
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            images_dir.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(data)
+            return f"![{alt}](images/{filename})"
+        except Exception as e:
+            print(f"    image fetch failed: {url} ({e})", file=sys.stderr)
+            return match.group(0)
+
+    return _MD_IMG_RE.sub(repl, md)
 
 
 def is_rate_limited_pdf(path: Path) -> bool:
@@ -171,6 +249,8 @@ def main() -> int:
     p.add_argument("--out", required=True, help="Output directory")
     p.add_argument("--cookie", default="", help='Auth cookie, e.g. "substack.sid=s%%3A..."')
     p.add_argument("--limit", type=int, default=0, help="Cap number of new posts (0 = all)")
+    p.add_argument("--no-markdown", action="store_true", help="Skip markdown export")
+    p.add_argument("--no-pdf", action="store_true", help="Skip PDF export")
     args = p.parse_args()
 
     out_dir = Path(args.out).expanduser()
@@ -205,19 +285,36 @@ def main() -> int:
         return 1
     print(f"  {len(posts)} posts in archive", flush=True)
 
-    def expected_path(post: dict) -> Path:
+    want_pdf = not args.no_pdf
+    want_md = not args.no_markdown
+
+    def base_name_for(post: dict) -> str:
         title = post.get("title") or "untitled"
         date = (post.get("post_date") or "")[:10] or "0000-00-00"
-        return out_dir / f"{date}_{slugify(title)}.pdf"
+        return f"{date}_{slugify(title)}"
 
-    # Reconcile cache against actual files on disk: if a post is in the
-    # cache but its PDF was deleted, drop it so we re-fetch.
+    def pdf_path_for(post: dict) -> Path:
+        return out_dir / f"{base_name_for(post)}.pdf"
+
+    def md_path_for(post: dict) -> Path:
+        return out_dir / "markdown" / base_name_for(post) / "post.md"
+
+    def is_complete(post: dict) -> bool:
+        ok = True
+        if want_pdf:
+            ok = ok and pdf_path_for(post).exists()
+        if want_md:
+            ok = ok and md_path_for(post).exists()
+        return ok
+
+    # Reconcile cache: if a post is in the cache but a required artifact
+    # is missing on disk, drop it so we re-fetch what's missing.
     stale = {str(p.get("id")) for p in posts
-             if str(p.get("id")) in archived and not expected_path(p).exists()}
+             if str(p.get("id")) in archived and not is_complete(p)}
     if stale:
         archived -= stale
         cache_path.write_text(json.dumps(sorted(archived)))
-        print(f"  {len(stale)} previously-archived PDFs missing on disk, will re-fetch", flush=True)
+        print(f"  {len(stale)} previously-archived posts incomplete on disk, will re-fetch", flush=True)
 
     new_posts = [p for p in posts if str(p.get("id")) not in archived]
     print(f"  {len(new_posts)} not yet archived", flush=True)
@@ -257,30 +354,72 @@ def main() -> int:
             slug = post.get("slug") or slugify(title)
             date = (post.get("post_date") or "")[:10] or "0000-00-00"
             canonical = post.get("canonical_url") or f"{args.url.rstrip('/')}/p/{slug}"
-            fname = f"{date}_{slugify(title)}.pdf"
-            out_path = out_dir / fname
-            print(f"[{i}/{len(new_posts)}] {fname}", flush=True)
-            success = False
-            for attempt in range(3):
-                if attempt > 0:
-                    backoff = 15 * (2 ** (attempt - 1))
-                    print(f"  retry {attempt} after {backoff}s ...", flush=True)
-                    time.sleep(backoff)
+            # The API's by-slug endpoint expects the slug from the URL path,
+            # which may differ from post.slug (older posts get a hash suffix).
+            api_slug = urlparse(canonical).path.rsplit("/p/", 1)[-1].rstrip("/") or slug
+            base = base_name_for(post)
+            pdf_path = pdf_path_for(post)
+            md_path = md_path_for(post)
+            print(f"[{i}/{len(new_posts)}] {base}", flush=True)
+
+            pdf_ok = pdf_path.exists() if want_pdf else True
+            md_ok = md_path.exists() if want_md else True
+
+            if want_pdf and not pdf_ok:
+                for attempt in range(3):
+                    if attempt > 0:
+                        backoff = 15 * (2 ** (attempt - 1))
+                        print(f"  pdf retry {attempt} after {backoff}s ...", flush=True)
+                        time.sleep(backoff)
+                    try:
+                        render_pdf(ws_url, canonical, cookie_pair, cookie_domain, pdf_path)
+                        if pdf_path.exists() and is_rate_limited_pdf(pdf_path):
+                            pdf_path.unlink()
+                            print("  got 'Too Many Requests' page, will retry", flush=True)
+                            continue
+                        pdf_ok = True
+                        break
+                    except Exception as e:
+                        print(f"  pdf failed: {e}", file=sys.stderr)
+
+            if want_md and not md_ok:
                 try:
-                    render_pdf(ws_url, canonical, cookie_pair, cookie_domain, out_path)
-                    if out_path.exists() and is_rate_limited_pdf(out_path):
-                        out_path.unlink()
-                        print("  got 'Too Many Requests' page, will retry", flush=True)
-                        continue
-                    archived.add(pid)
-                    cache_path.write_text(json.dumps(sorted(archived)))
-                    ok += 1
-                    success = True
-                    break
+                    body_html = ""
+                    try:
+                        data = fetch_post_body(args.url, api_slug, args.cookie)
+                        body_html = data.get("body_html") or ""
+                    except urllib.error.HTTPError as e:
+                        if e.code != 404:
+                            raise
+                    if not body_html:
+                        body_html = fetch_post_body_via_page(canonical, args.cookie)
+                    if not body_html:
+                        raise RuntimeError("could not extract body (paywalled or wrong cookie?)")
+                    md = html_to_markdown(body_html)
+                    md_dir = md_path.parent
+                    md_dir.mkdir(parents=True, exist_ok=True)
+                    md = download_images_and_rewrite(md, md_dir / "images")
+                    front = (
+                        f"# {title}\n\n"
+                        f"*Published {date}*\n\n"
+                        f"[Original]({canonical})\n\n"
+                        f"---\n\n"
+                    )
+                    md_path.write_text(front + md)
+                    md_ok = True
                 except Exception as e:
-                    print(f"  failed: {e}", file=sys.stderr)
-            if not success:
-                print(f"  giving up on {fname}", file=sys.stderr)
+                    print(f"  markdown failed: {e}", file=sys.stderr)
+
+            if pdf_ok and md_ok:
+                archived.add(pid)
+                cache_path.write_text(json.dumps(sorted(archived)))
+                ok += 1
+            else:
+                missing = []
+                if want_pdf and not pdf_ok: missing.append("pdf")
+                if want_md and not md_ok: missing.append("md")
+                print(f"  incomplete: missing {', '.join(missing)}", file=sys.stderr)
+
             time.sleep(5)  # be polite
         print(f"Done. {ok}/{len(new_posts)} archived.")
         return 0 if ok == len(new_posts) else 1
