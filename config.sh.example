@@ -1,0 +1,25 @@
+# Substack archiver — single source of configuration.
+# Copy this file to config.sh and edit the values below. Nothing else
+# needs editing.
+
+# 1. The Substack you subscribe to (no trailing slash).
+SUBSTACK_URL="https://YOURPUBLICATION.substack.com"
+
+# 2. Where PDFs should be saved. Will be created if it doesn't exist.
+#    For an external drive, use something like "/Volumes/YourDrive/substack-pdfs".
+OUTPUT_DIR="$HOME/substack-pdfs"
+
+# 3. Your Substack session cookie. For paid publications this is required.
+#    Grab it from Chrome DevTools → Application → Cookies → substack.sid.
+#    Format MUST be NAME=VALUE, e.g. "substack.sid=s%3A..."
+COOKIE="substack.sid=PASTE_YOUR_COOKIE_VALUE_HERE"
+
+# 4. (Optional) If OUTPUT_DIR is on an external drive that may be
+#    unplugged, set this to the mount point. The script will exit cleanly
+#    when the drive isn't connected, so a scheduled run no-ops instead of
+#    erroring. Leave empty to disable the check.
+REQUIRE_MOUNT=""
+
+# 5. (Optional) Path to your Python 3 binary. Default works for both
+#    python.org installs and Homebrew on Apple Silicon.
+PYTHON_BIN="/usr/local/bin/python3"

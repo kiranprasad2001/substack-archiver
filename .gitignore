@@ -1,0 +1,7 @@
+config.sh
+*.log
+*.err
+.archived.json
+.DS_Store
+__pycache__/
+*.pyc
