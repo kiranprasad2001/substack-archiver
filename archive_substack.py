@@ -205,6 +205,20 @@ def main() -> int:
         return 1
     print(f"  {len(posts)} posts in archive", flush=True)
 
+    def expected_path(post: dict) -> Path:
+        title = post.get("title") or "untitled"
+        date = (post.get("post_date") or "")[:10] or "0000-00-00"
+        return out_dir / f"{date}_{slugify(title)}.pdf"
+
+    # Reconcile cache against actual files on disk: if a post is in the
+    # cache but its PDF was deleted, drop it so we re-fetch.
+    stale = {str(p.get("id")) for p in posts
+             if str(p.get("id")) in archived and not expected_path(p).exists()}
+    if stale:
+        archived -= stale
+        cache_path.write_text(json.dumps(sorted(archived)))
+        print(f"  {len(stale)} previously-archived PDFs missing on disk, will re-fetch", flush=True)
+
     new_posts = [p for p in posts if str(p.get("id")) not in archived]
     print(f"  {len(new_posts)} not yet archived", flush=True)
     if args.limit > 0:
